@@ -1,11 +1,33 @@
 #!/bin/bash
 
-# Assignment 2 - COMP2137 Setup Script
-# This script automates the setup of development tools for bash scripting
+# Assignment 2 
 
-# Function to display colored messages
-function message {
-    echo -e "\e[1;34m$1\e[0m"
+# Color codes for output formatting
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to display status messages
+function status_message {
+    echo -e "${BLUE}[STATUS]${NC} $1"
+}
+
+# Function to display success messages
+function success_message {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+# Function to display warning messages
+function warning_message {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+# Function to display error messages
+function error_message {
+    echo -e "${RED}[ERROR]${NC} $1"
+    exit 1
 }
 
 # Function to check if a command exists
@@ -13,93 +35,201 @@ function command_exists {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Update package lists
-message "Updating package lists..."
-sudo apt update
+# Function to check if a package is installed
+function package_installed {
+    dpkg -l | grep -qw "$1"
+}
 
-# Install ShellCheck
-message "Installing ShellCheck..."
-if ! command_exists shellcheck; then
-    sudo apt install -y shellcheck
-    message "ShellCheck installed successfully."
-else
-    message "ShellCheck is already installed."
-fi
+# Function to check if a user exists
+function user_exists {
+    id -u "$1" >/dev/null 2>&1
+}
 
-# Generate SSH keys
-message "Generating SSH keys..."
-if [ ! -f ~/.ssh/id_ed25519 ]; then
-    ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
-    message "SSH keys generated successfully."
+# Function to generate SSH keys for a user
+function generate_ssh_keys {
+    local username=$1
+    local home_dir
+    home_dir=$(eval echo ~"$username")
     
-    # Display public key
-    message "Your SSH public key is:"
-    cat ~/.ssh/id_ed25519.pub
-    echo ""
+    status_message "Generating SSH keys for $username..."
     
-    message "Please manually add this key to your GitHub account:"
-    message "1. Go to GitHub.com and log in"
-    message "2. Click your profile picture → Settings → SSH and GPG keys"
-    message "3. Click 'New SSH Key'"
-    message "4. Paste the above key and save"
-else
-    message "SSH keys already exist."
-fi
-
-# Configure Git
-message "Configuring Git..."
-read -p "Enter your Git email address: " git_email
-read -p "Enter your Git name: " git_name
-
-git config --global user.email "$git_email"
-git config --global user.name "$git_name"
-
-message "Git configured with:"
-message "Email: $git_email"
-message "Name: $git_name"
-
-# Clone repository (if not already exists)
-message "Setting up COMP2137 repository..."
-if [ ! -d ~/COMP2137 ]; then
-    read -p "Enter your GitHub username: " github_username
-    
-    # Test SSH connection to GitHub
-    message "Testing SSH connection to GitHub..."
-    ssh -T git@github.com
-    
-    message "Cloning COMP2137 repository..."
-    git clone git@github.com:$github_username/COMP2137.git ~/COMP2137
-    
-    if [ $? -eq 0 ]; then
-        message "Repository cloned successfully to ~/COMP2137"
+    # Generate RSA key
+    if [ ! -f "$home_dir/.ssh/id_rsa" ]; then
+        sudo -u "$username" ssh-keygen -t rsa -f "$home_dir/.ssh/id_rsa" -N "" -q
+        cat "$home_dir/.ssh/id_rsa.pub" >> "$home_dir/.ssh/authorized_keys"
     else
-        message "Failed to clone repository. Please ensure:"
-        message "1. You've created the COMP2137 repo on GitHub"
-        message "2. You've added your SSH key to GitHub"
-        message "3. The repository exists at github.com/$github_username/COMP2137"
+        warning_message "RSA key already exists for $username"
     fi
-else
-    message "COMP2137 directory already exists at ~/COMP2137"
-fi
+    
+    # Generate ED25519 key
+    if [ ! -f "$home_dir/.ssh/id_ed25519" ]; then
+        sudo -u "$username" ssh-keygen -t ed25519 -f "$home_dir/.ssh/id_ed25519" -N "" -q
+        cat "$home_dir/.ssh/id_ed25519.pub" >> "$home_dir/.ssh/authorized_keys"
+    else
+        warning_message "ED25519 key already exists for $username"
+    fi
+    
+    # Set proper permissions
+    chown -R "$username:$username" "$home_dir/.ssh"
+    chmod 700 "$home_dir/.ssh"
+    chmod 600 "$home_dir/.ssh/authorized_keys"
+    
+    success_message "SSH keys generated for $username"
+}
 
-# Install optional tools
-message "Would you like to install additional text editors? (nano/vim/gedit)"
-read -p "Install additional editors? [y/N]: " install_editors
+# Function to add additional public key for dennis
+function add_dennis_key {
+    local username="dennis"
+    local home_dir
+    home_dir=$(eval echo ~"$username")
+    local dennis_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG4rT3vTt99Ox5kndS4HmgTrKBT8SKzhK4rhGkEVGlCI student@generic-vm"
+    
+    if grep -q "$dennis_key" "$home_dir/.ssh/authorized_keys"; then
+        warning_message "Additional key already exists for $username"
+    else
+        status_message "Adding additional key for $username..."
+        echo "$dennis_key" >> "$home_dir/.ssh/authorized_keys"
+        success_message "Additional key added for $username"
+    fi
+}
 
-if [[ "$install_editors" =~ ^[Yy]$ ]]; then
-    message "Installing additional editors..."
-    sudo apt install -y nano vim gedit
-    message "Editors installed: nano, vim, gedit"
-fi
+# Function to configure network settings
+function configure_network {
+    status_message "Configuring network settings..."
+    
+    # Check if Netplan file exists
+    local netplan_file="/etc/netplan/50-cloud-init.yaml"
+    if [ ! -f "$netplan_file" ]; then
+        error_message "Netplan configuration file not found at $netplan_file"
+    fi
+    
+    # Check if configuration is already correct
+    if grep -q "192.168.16.21/24" "$netplan_file"; then
+        warning_message "Network configuration already correct"
+        return
+    fi
+    
+    # Backup original file
+    cp "$netplan_file" "$netplan_file.bak"
+    
+    # Configure the correct IP address
+    sed -i '/eth1:/,/dhcp4: true/d' "$netplan_file"
+    cat <<EOF >> "$netplan_file"
+        eth1:
+            addresses: [192.168.16.21/24]
+            dhcp4: false
+            optional: true
+EOF
+    
+    # Apply network configuration
+    if netplan apply; then
+        success_message "Network configuration updated successfully"
+    else
+        error_message "Failed to apply network configuration"
+    fi
+}
 
-# Final instructions
-message "\nSetup complete! Here's what to do next:"
-message "1. Change to your project directory: cd ~/COMP2137"
-message "2. Create/edit scripts using your preferred editor"
-message "3. Use 'shellcheck your_script.sh' to check your scripts"
-message "4. Use git to track changes:"
-message "   - git add your_files"
-message "   - git commit -m 'your message'"
-message "   - git push"
+# Function to update hosts file
+function update_hosts_file {
+    status_message "Updating /etc/hosts file..."
+    
+    # Remove any existing entry for server1
+    sed -i '/server1/d' /etc/hosts
+    
+    # Add correct entry
+    echo "192.168.16.21 server1" >> /etc/hosts
+    success_message "/etc/hosts file updated"
+}
 
-message "\nRemember to always run shellcheck on your scripts before submitting!"
+# Function to install and configure required packages
+function install_packages {
+    local packages=("apache2" "squid")
+    
+    for pkg in "${packages[@]}"; do
+        if package_installed "$pkg"; then
+            warning_message "$pkg is already installed"
+        else
+            status_message "Installing $pkg..."
+            apt-get install -y "$pkg" >/dev/null 2>&1
+            
+            if netplan apply; then
+                success_message "$pkg installed successfully"
+                
+                # Enable and start services
+                systemctl enable "$pkg" >/dev/null 2>&1
+                systemctl start "$pkg" >/dev/null 2>&1
+            else
+                error_message "Failed to install $pkg"
+            fi
+        fi
+    done
+}
+
+# Function to create user accounts
+function create_users {
+    local users=("dennis" "aubrey" "captain" "snibbles" "brownie" "scooter" "sandy" "perrier" "cindy" "tiger" "yoda")
+    
+    for user in "${users[@]}"; do
+        if user_exists "$user"; then
+            warning_message "User $user already exists"
+        else
+            status_message "Creating user $user..."
+            useradd -m -s /bin/bash "$user"
+            
+            if netplan apply; then
+                success_message "User $user created successfully"
+                
+                # Create .ssh directory
+                mkdir -p "/home/$user/.ssh"
+                chown "$user:$user" "/home/$user/.ssh"
+                chmod 700 "/home/$user/.ssh"
+                
+                # Generate SSH keys
+                generate_ssh_keys "$user"
+            else
+                error_message "Failed to create user $user"
+            fi
+        fi
+    done
+    
+    # Add dennis to sudo group
+    if groups dennis | grep -q '\bsudo\b'; then
+        warning_message "User dennis is already in sudo group"
+    else
+        status_message "Adding dennis to sudo group..."
+        usermod -aG sudo dennis
+        success_message "dennis added to sudo group"
+    fi
+    
+    # Add additional key for dennis
+    add_dennis_key
+}
+
+# Main execution
+function main {
+    # Check if script is run as root
+    if [ "$(id -u)" -ne 0 ]; then
+        error_message "This script must be run as root"
+    fi
+    
+    # Update package lists
+    status_message "Updating package lists..."
+    apt-get update >/dev/null 2>&1
+    
+    # Configure network
+    configure_network
+    
+    # Update hosts file
+    update_hosts_file
+    
+    # Install required packages
+    install_packages
+    
+    # Create users and configure SSH keys
+    create_users
+    
+    success_message "Server configuration completed successfully!"
+}
+
+# Execute main function
+main
